@@ -1,0 +1,445 @@
+DROP SCHEMA  IF EXISTS projet CASCADE;
+CREATE SCHEMA projet;
+
+
+
+CREATE TABLE projet.cours (
+    id_cour SERIAL PRIMARY KEY NOT NULL,
+    code_cour VARCHAR(8) UNIQUE check ( code_cour SIMILAR TO 'BINV[0-9]{4}'),
+    nom VARCHAR(50) check ( nom<>'' ) NOT NULL,
+    bloc VARCHAR(1) check ( bloc SIMILAR TO '[1-3]'),
+    nombre_credit INTEGER check ( nombre_credit > 0 ) NOT NULL
+);
+
+CREATE TABLE projet.etudiants(
+    id_etudiant SERIAL PRIMARY KEY NOT NULL,
+    nom VARCHAR(15) check ( nom<>'' ) NOT NULL,
+    prenom VARCHAR(15) check ( prenom <>'' ) NOT NULL,
+    mail varchar(100) check ( mail SIMILAR TO '%@student.vinci.be') NOT NULL UNIQUE,
+    mot_de_passe VARCHAR(100) NOT NULL
+);
+
+
+CREATE TABLE projet.inscriptions(
+    id_cour INTEGER NOT NULL REFERENCES projet.cours(id_cour)  ,
+    id_etudiant INTEGER NOT NULL REFERENCES projet.etudiants(id_etudiant),
+    PRIMARY KEY (id_cour, id_etudiant)
+);
+
+CREATE TABLE projet.projets(
+     id_projet SERIAL PRIMARY KEY,
+     nom VARCHAR(15) check ( nom<>'' ) NOT NULL,
+     date_debut DATE NOT NULL,
+     date_fin DATE check ( date_debut < projets.date_fin )NOT NULL,
+     identifiant VARCHAR(50) NOT NULL UNIQUE,
+     id_cour INTEGER NOT NULL REFERENCES projet.cours(id_cour)
+);
+
+CREATE TABLE projet.groupes (
+    id_projet INTEGER NOT NULL REFERENCES projet.projets(id_projet),
+    numero INTEGER NOT NULL,
+    nombre_max_etudiants INTEGER NOT NULL,
+    nombre_etudiant INTEGER NOT NULL,
+    valide BOOLEAN NOT NULL,
+    est_complet BOOLEAN NOT NULL,
+    PRIMARY KEY (id_projet,numero)
+);
+
+CREATE TABLE projet.etudiants_groupes(
+    id_etudiant INTEGER REFERENCES projet.etudiants(id_etudiant) NOT NULL ,
+    id_numero INTEGER NOT NULL,
+    id_projet INTEGER  NOT NULL,
+    PRIMARY KEY (id_etudiant,id_projet,id_numero),
+    FOREIGN KEY (id_projet,id_numero) REFERENCES projet.groupes(id_projet,numero),
+    UNIQUE(id_etudiant,id_projet)
+);
+
+
+
+---------------------------------------------------------------Application centrale --------------------------------------------------------------
+
+
+-- 1° Ajouter un cours
+CREATE OR REPLACE FUNCTION projet.ajouterCours(_code_cour VARCHAR(8),nom_ varchar(50), bloc_ varchar(1), nombreCredits INTEGER) RETURNS void AS $$
+DECLARE
+BEGIN
+    Insert Into projet.cours VALUES (DEFAULT, _code_cour, nom_,bloc_,nombreCredits);
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 2° Ajouter un etudiant
+CREATE OR REPLACE FUNCTION projet.ajouterEtudiant(nom_ VARCHAR(15), prenom_ VARCHAR(15), mail_ VARCHAR(100),mot_de_passe_ VARCHAR(100)) RETURNS
+VOID AS $$
+BEGIN
+
+        INSERT INTO projet.etudiants VALUES (DEFAULT,nom_,prenom_,mail_,mot_de_passe_);
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 3° inscrire un étudiant à un cours
+CREATE OR REPLACE FUNCTION projet.ajouterEtudiantAUnCours(_mail VARCHAR(100), code_cour_ VARCHAR(8)) RETURNS VOID AS $$
+DECLARE
+    id_etudiant INTEGER;
+    _id_cour INTEGER;
+BEGIN
+    IF NOT EXISTS(SELECT e.id_etudiant FROM projet.etudiants e WHERE e.mail=_mail) THEN RAISE 'etudiant invalide';
+    END IF;
+    IF NOT EXISTS(SELECT c.id_cour FROM projet.cours c WHERE c.code_cour= code_cour_) THEN RAISE 'cours invalide';
+    END IF;
+    id_etudiant:=(SELECT e.id_etudiant FROM projet.etudiants e WHERE e.mail=_mail);
+    _id_cour:=(SELECT c.id_cour FROM projet.cours c WHERE c.code_cour= code_cour_);
+
+    IF EXISTS(SELECT p.* FROM projet.cours c, projet.projets p WHERE p.id_cour = _id_cour) THEN RAISE 'ALREADY PROJECT FOR THIS GROUP' ;
+    ELSE
+        INSERT INTO projet.inscriptions VALUES (_id_cour, id_etudiant);
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+-- 4° creer un projet pour un cours
+CREATE OR REPLACE FUNCTION projet.ajouterProjet(nom_ VARCHAR(15), date_debut_ DATE, date_fin_ DATE, identifiant_ VARCHAR(50), id_cour_ INTEGER) RETURNS
+VOID AS $$
+BEGIN
+        INSERT INTO projet.projets VALUES (DEFAULT,nom_,date_debut_,date_fin_,identifiant_,id_cour_);
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 5 creer des groupes pour un projet
+CREATE OR REPLACE FUNCTION projet.creerGroupe(identifiant_ VARCHAR(15), nombre_groupe_ INTEGER, nombre_place_groupe_ INTEGER ) RETURNS
+VOID AS $$
+DECLARE
+    id_projet_ INTEGER;
+    nombre INTEGER:=0;
+    nombre_groupe INTEGER;
+BEGIN
+    SELECT p.id_projet  FROM projet.projets p WHERE identifiant_ LIKE p.identifiant INTO id_projet_;
+    IF NOT EXISTS( SELECT p.id_projet  FROM projet.projets p WHERE identifiant_ LIKE p.identifiant ) THEN
+		RAISE 'id_projet non present';
+	END IF;
+
+    SELECT COUNT(g.*) FROM projet.groupes g WHERE g.id_projet = id_projet_ INTO nombre;
+    nombre:=nombre+1;
+    nombre_groupe:= (nombre_groupe_+nombre-1);
+    for i in nombre..nombre_groupe LOOP
+        -- initialiser le nombre de groupe
+    INSERT INTO projet.groupes VALUES (id_projet_,i,nombre_place_groupe_,0,FALSE,FALSE);
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION projet.trigger_creer_groupe() RETURNS TRIGGER AS $$
+DECLARE
+    nombre_inscrit_au_cours INTEGER;
+    nombre_max_inscrit INTEGER;
+
+BEGIN
+     SELECT COUNT(i.id_etudiant)  FROM projet.projets p , projet.inscriptions i WHERE p.id_cour = i.id_cour AND p.id_projet = NEW.id_projet INTO nombre_inscrit_au_cours;
+     SELECT SUM(g.nombre_max_etudiants) FROM projet.groupes g WHERE  g.id_projet =  NEW.id_projet INTO nombre_max_inscrit ;
+      IF(nombre_max_inscrit > nombre_inscrit_au_cours) THEN
+          raise ' le nombre de places dans les groupes du projet dépassent le nombre d’etudiant inscrit ';
+       end if;
+     RETURN NEW ;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- Trigger creation de nouveax groupes
+CREATE TRIGGER trigger_creer_nouveau_groupe AFTER INSERT ON projet.groupes
+    FOR EACH ROW EXECUTE PROCEDURE projet.trigger_creer_groupe();
+
+
+
+-- Question 6°  visualiser les cours
+CREATE OR REPLACE VIEW projet.tousLesCours AS
+SELECT c.code_cour, c.nom , COALESCE(string_agg(p.identifiant, ', '),'Pas encore de projet') AS liste_projets
+FROM projet.cours c LEFT OUTER JOIN projet.projets p ON c.id_cour = p.id_cour
+GROUP BY c.code_cour, c.nom;
+
+
+
+-- 7° Visualiser tous les projets
+CREATE OR REPLACE VIEW projet.visualiserProjet AS
+    SELECT p.id_projet, p.nom, p.id_cour, COUNT(g.*) AS nombre_de_groupes, COUNT(case when g.est_complet = true then (g.*) end ) AS nombre_de_groupes_complets, COUNT(case when g.valide = true then (g.*) end) AS nombres_de_groupes_valides
+    FROM projet.projets p LEFT OUTER JOIN projet.groupes g ON p.id_projet = g.id_projet
+    GROUP BY p.id_projet, p.nom, p.id_cour;
+
+
+
+-- 8° Visualiser toutes les compositions de groupe d’un projet
+CREATE OR REPLACE VIEW  projet.visualiserToutesLesCompositionsDuProjet AS
+    SELECT g.numero, e.nom, e.prenom, g.est_complet, g.valide , g.id_projet
+    FROM projet.groupes g LEFT JOIN projet.etudiants_groupes eg ON g.id_projet = eg.id_projet and g.numero = eg.id_numero LEFT JOIN projet.etudiants e ON eg.id_etudiant = e.id_etudiant;
+
+-- 9° Valider un groupe
+CREATE OR REPLACE FUNCTION projet.validerGroupe(_identifiantProjet VARCHAR(15) , _numerogroupe INTEGER) RETURNS VOID AS $$
+DECLARE
+    num_projet INTEGER;
+BEGIN
+
+    IF NOT EXISTS(SELECT g.numero
+        FROM projet.groupes g , projet.projets p
+        WHERE g.numero = _numerogroupe AND g.id_projet = p.id_projet AND p.identifiant = _identifiantProjet)THEN RAISE EXCEPTION 'attention le numero du groupe n existe pas ';
+        END IF;
+
+    SELECT p.id_projet FROM projet.projets p WHERE p.identifiant = _identifiantProjet INTO num_projet;
+    UPDATE projet.groupes
+    SET valide = true
+    WHERE id_projet = num_projet AND numero = _numerogroupe;
+    RETURN ;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION projet.triggerValiderGroupe() RETURNS TRIGGER AS $$
+DECLARE
+
+BEGIN
+
+    IF (NEW.est_complet = FALSE) THEN RAISE 'Nombre d''etudiants plus bas que le nombre d''etudiants max ';
+    END IF;
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER triggerValiderGroupe AFTER UPDATE OF valide ON projet.groupes FOR EACH ROW
+    EXECUTE PROCEDURE projet.triggerValiderGroupe();
+
+
+-- 10° Valider tous les groupes d’un projet
+CREATE OR REPLACE FUNCTION projet.validerTousLesGroupes(_identifiantProjet VARCHAR(15)) RETURNS VOID AS $$
+DECLARE
+    _id_projet INTEGER;
+    record RECORD;
+BEGIN
+    -- Renvoi l'id_projet
+    SELECT p.id_projet FROM projet.projets p WHERE p.identifiant = _identifiantProjet INTO _id_projet;
+
+    FOR record in SELECT * FROM projet.groupes g WHERE g.id_projet = _id_projet LOOP
+            PERFORM projet.validerGroupe( _identifiantProjet, record.numero);
+        end loop;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+
+
+------------------------------------------------------ Application Etudiant---------------------------------------------------------------
+
+--1° Visualiser les cours auxquels l'etudiant participe
+CREATE OR REPLACE VIEW projet.visualiserCoursEtudiant AS
+    SELECT e.id_etudiant, c.code_cour, c.nom, COALESCE(string_agg(DISTINCT p.identifiant, ', '),'Pas encore de projet') AS liste_projets_etudiant
+    FROM projet.etudiants e LEFT OUTER JOIN projet.inscriptions i ON e.id_etudiant = i.id_etudiant LEFT OUTER JOIN projet.cours c ON i.id_cour = c.id_cour
+    LEFT OUTER JOIN projet.projets p ON c.id_cour = p.id_cour LEFT OUTER JOIN projet.etudiants_groupes eg ON p.id_projet = eg.id_projet
+    GROUP BY e.id_etudiant,c.code_cour, c.nom;
+
+
+
+--2° Rajouter etudiant dans un groupe
+CREATE OR REPLACE FUNCTION projet.ajouterEtudiantGroupe(_identifiantProjet VARCHAR(15) , _numerogroupe INTEGER, id_etudiant_ INTEGER) RETURNS VOID AS $$
+DECLARE
+    num_projet INTEGER;
+BEGIN
+    --AJOUTER CONDITION IF EXIST POUR LE PROJET
+    SELECT p.id_projet FROM projet.projets p WHERE p.identifiant = _identifiantProjet INTO num_projet;
+    INSERT INTO projet.etudiants_groupes VALUES (id_etudiant_, _numerogroupe, num_projet);
+RETURN ;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION projet.triggerAjouterEtudiantGroupe() RETURNS TRIGGER AS $$
+DECLARE
+    _nombre_max_etudiant INTEGER;
+    _total_etudiant_groupe INTEGER;
+    _etudiant_inscrit_au_cours INTEGER;
+    _groupe_complet BOOLEAN;
+BEGIN
+
+    _groupe_complet:=(SELECT DISTINCT g.est_complet
+    FROM projet.etudiants_groupes eg, projet.groupes g
+    WHERE g.numero = eg.id_numero AND g.id_projet = eg.id_projet AND g.numero = NEW.id_numero AND g.id_projet = NEW.id_projet );
+
+    IF(_groupe_complet = TRUE)THEN RAISE 'le groupe est complet, l etudiant ne peut pas etre ajouter au groupe  ';
+    END IF;
+
+    -- return 1 si l etudiant est inscrit au cours associe au projet sinon return 0
+    SELECT COUNT(i.*)
+    FROM projet.inscriptions i , projet.projets p
+    WHERE i.id_etudiant = NEW.id_etudiant AND p.id_cour = i.id_cour AND p.id_projet = NEW.id_projet INTO _etudiant_inscrit_au_cours;
+
+    IF(_etudiant_inscrit_au_cours = 0)THEN RAISE 'L etudiant n est pas inscrit au cours associé au projet, l etudiant ne peut pas etre ajouter au groupe  ';
+    END IF;
+
+    -- selectionne le nombre d etudiant actuelmlement dans le groupe
+    _total_etudiant_groupe:=(SELECT DISTINCT g.nombre_etudiant
+    FROM projet.etudiants_groupes eg, projet.groupes g
+    WHERE g.numero = eg.id_numero AND g.id_projet = eg.id_projet AND g.numero = NEW.id_numero AND g.id_projet = NEW.id_projet );
+
+    -- selectionne le nombre max d etudiant qui peuvent se retrouver dans le groupe
+    _nombre_max_etudiant:=(SELECT DISTINCT g.nombre_max_etudiants
+    FROM projet.etudiants_groupes eg, projet.groupes g
+    WHERE g.numero = eg.id_numero AND g.id_projet = eg.id_projet AND g.numero = NEW.id_numero AND g.id_projet = NEW.id_projet );
+
+    _total_etudiant_groupe := _total_etudiant_groupe +1;
+
+    -- si l enombre d etudiant apres ajout dans le groupe = nombre max etudiant dans le groupe alors le groupe devient complet on SET estComplet a true
+    IF(_nombre_max_etudiant = _total_etudiant_groupe)
+    THEN
+         UPDATE projet.groupes  SET est_complet= TRUE WHERE numero = NEW.id_numero AND id_projet = NEW.id_projet;
+   END IF;
+
+    UPDATE projet.groupes  SET nombre_etudiant = _total_etudiant_groupe WHERE numero = NEW.id_numero AND id_projet = NEW.id_projet;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+--trigger qui verifie apres un ajout d un etudiant dans un groupe si il est possible de le rajouter
+-- dans le cas ou le groupe est complet ou si l etdudiant n est pas inscrit a ce cours l ajout echoue
+CREATE TRIGGER triggerAjouterEtudiantGroupe AFTER INSERT ON projet.etudiants_groupes FOR EACH ROW
+    EXECUTE PROCEDURE projet.triggerAjouterEtudiantGroupe();
+
+
+--3° retirer un etudiant d'un groupe
+CREATE OR REPLACE FUNCTION projet.retirerEtudiantGroupe(_identifiantProjet VARCHAR(15) , id_etudiant_ INTEGER) RETURNS VOID AS $$
+DECLARE
+    num_projet INTEGER;
+BEGIN
+
+    IF NOT EXISTS(SELECT eg.id_etudiant, eg.id_projet
+    FROM  projet.etudiants_groupes eg, projet.projets p
+    WHERE eg.id_etudiant = id_etudiant_ AND p.identifiant = _identifiantProjet AND eg.id_projet= p.id_projet)THEN RAISE 'etudiant n est actuellement inscrit dans aucun groupe';
+    END IF;
+
+    --supprime l etudiant dont le numero du projet est celui passé en parametre
+    SELECT p.id_projet FROM projet.projets p WHERE p.identifiant = _identifiantProjet INTO num_projet;
+    DELETE FROM projet.etudiants_groupes WHERE id_projet = num_projet AND id_etudiant = id_etudiant_ ;
+RETURN ;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+CREATE OR REPLACE FUNCTION projet.triggerRetirerEtudiantGroupe() RETURNS TRIGGER AS $$
+DECLARE
+    _groupe_complet BOOLEAN;
+    _groupe_etudiant_valide BOOLEAN;
+    _new_nombre_groupe INTEGER;
+BEGIN
+
+    --verifier si le groupe dans lequel l'etudiant se situe a été validé
+    SELECT g.valide
+    FROM projet.groupes g, projet.etudiants_groupes eg
+    WHERE g.id_projet = OLD.id_projet AND g.numero = OLD.id_numero INTO _groupe_etudiant_valide;
+
+    IF (_groupe_etudiant_valide = TRUE)THEN RAISE 'le groupe dont l etudiant fait parti a deja été valider, imposible d effectuer le retrait';
+    END IF;
+
+    --si les deux conditions sont bonnes alors je peux decrementer le nombre d etudiant du groupe de l'etudiant
+    SELECT g.nombre_etudiant
+    FROM projet.groupes g
+    WHERE g.id_projet = OLD.id_projet AND g.numero = OLD.id_numero INTO _new_nombre_groupe;
+
+    _new_nombre_groupe := _new_nombre_groupe-1;
+
+    SELECT g.est_complet
+    FROM projet.groupes g, projet.etudiants_groupes eg
+    WHERE g.id_projet = OLD.id_projet AND g.numero = OLD.id_numero INTO _groupe_complet;
+
+    UPDATE projet.groupes SET nombre_etudiant = _new_nombre_groupe WHERE id_projet = OLD.id_projet AND numero = OLD.id_numero;
+    IF(_groupe_complet = TRUE)THEN UPDATE projet.groupes SET est_complet = FALSE WHERE id_projet = OLD.id_projet AND numero = OLD.id_numero;
+        END IF;
+
+RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+--trigger qui verifie si le groupe dont l etudiant fait parti a deja été valider , si oui le retrait echoue
+CREATE TRIGGER triggerRetirerEtudiantGroupe BEFORE DELETE ON projet.etudiants_groupes FOR EACH ROW
+    EXECUTE PROCEDURE projet.triggerRetirerEtudiantGroupe();
+
+
+--°4 : visualiser tout les projets des cours auxquel un etudiant est inscrit
+CREATE OR REPLACE VIEW projet.visualiserProjetsCoursInscrit AS
+    SELECT et.id_etudiant AS "idetudiant" , p.id_projet AS "idprojet", p.nom AS "nom_projet",
+           p.id_cour AS "id_du_cour",eg.id_numero "numer_dugroupe"
+    FROM projet.etudiants et LEFT OUTER JOIN projet.inscriptions i ON et.id_etudiant = i.id_etudiant
+        LEFT OUTER JOIN projet.projets p ON i.id_cour = p.id_cour
+        LEFT OUTER JOIN projet.etudiants_groupes eg ON eg.id_projet = p.id_projet AND et.id_etudiant = eg.id_etudiant
+    GROUP BY et.id_etudiant, p.id_projet , p.nom ,  p.id_cour , eg.id_numero;
+
+
+--5° : visualiser tous les projets pour lesquelles l etudiant n a pas encore de groupe
+CREATE OR REPLACE VIEW projet.visualiserProjetsSansGroupe AS
+    SELECT et.id_etudiant AS "idetudiant" , p.id_projet AS "idprojet", p.nom AS "nom_projet",
+           p.id_cour AS "id_du_cour" , p.date_debut AS "date_debut" , p.date_fin AS "date_fin"
+    FROM projet.etudiants et LEFT OUTER JOIN projet.inscriptions i ON et.id_etudiant = i.id_etudiant
+        LEFT OUTER JOIN projet.projets p ON i.id_cour = p.id_cour
+        LEFT OUTER JOIN projet.etudiants_groupes eg ON eg.id_projet = p.id_projet AND et.id_etudiant = eg.id_etudiant
+    GROUP BY et.id_etudiant, p.id_projet , p.nom ,  p.id_cour , eg.id_numero, p.date_debut, p.date_fin
+    HAVING eg.id_numero IS NULL;
+
+
+--  6° Visualiser toutes les compositions de groupes incomplets d’un projet
+drop view if exists projet.visualiserGroupeIncomplets;
+CREATE OR REPLACE VIEW projet.visualiserGroupeIncomplets AS
+SELECT p.identifiant AS "identifiant_projet", g.numero AS "numero_groupe", e.nom AS "Nom", e.prenom AS "Prenom", (g.nombre_max_etudiants-g.nombre_etudiant) AS "Nombre de place disponible"
+    FROM projet.projets p LEFT OUTER JOIN projet.groupes g ON p.id_projet = g.id_projet LEFT OUTER JOIN projet.etudiants_groupes eg ON g.id_projet = eg.id_projet and g.numero = eg.id_numero
+    LEFT OUTER JOIN projet.etudiants e ON eg.id_etudiant = e.id_etudiant
+    WHERE g.est_complet=FALSE
+    ORDER BY 1 ASC;
+
+
+------------------------------------------------------------INSERT INTO SCENARIO DE DEMO  --------------------------------------------------------------
+-- Ajout de deux cours
+INSERT INTO projet.cours VALUES (DEFAULT, 'BINV2040','BD2', 2, 6);
+INSERT INTO projet.cours VALUES (DEFAULT, 'BINV1020','APOO', 1, 6);
+
+-- Ajout de deux etudiants
+INSERT INTO projet.etudiants VALUES (DEFAULT, 'Damas','Christophe','cd@student.vinci.be','$2a$10$ZmiuYk/0jFV8CBCPfVLM2elIXDAwpV.FyMoDbg2MehUqFPv25Ogm6');
+INSERT INTO projet.etudiants VALUES (DEFAULT, 'Ferneeuw','Stéphanie','sf@student.vinci.be','$2a$10$ZmiuYk/0jFV8CBCPfVLM2elIXDAwpV.FyMoDbg2MehUqFPv25Ogm6');
+
+
+-- Inscription des deux étudiants au cours de BD2
+INSERT INTO projet.inscriptions VALUES (1,1);
+INSERT INTO projet.inscriptions VALUES (1,2);
+INSERT INTO projet.inscriptions VALUES (2,2);
+
+
+
+
+-- Creation de 2 projets pour le cours de BD2 : INVERSER LES JOUR ET LES MOIS
+INSERT INTO projet.projets VALUES (DEFAULT, 'projet SQL', '10/09/2023', '15/12/2023', 'projSQL', 1);
+INSERT INTO projet.projets VALUES (DEFAULT, 'DSD', '30/09/2023', '1/12/2023', 'dsd', 1);
+
+-- Ajout d'un groupe vide de deux etudiants au projet SQL
+SELECT projet.creerGroupe('projSQL',1,2);
+
+GRANT CONNECT ON DATABASE dbsamyoffer TO raphaelmalka;
+GRANT USAGE ON SCHEMA projet TO raphaelmalka;
+
+/* GRANT SUR LES SELECT */
+GRANT SELECT ON projet.visualiserCoursEtudiant TO raphaelmalka;
+GRANT SELECT ON projet.visualiserProjetsCoursInscrit TO raphaelmalka;
+GRANT SELECT ON projet.visualiserProjetsSansGroupe TO raphaelmalka;
+GRANT SELECT ON projet.visualiserGroupeIncomplets TO raphaelmalka;
+GRANT SELECT ON projet.projets, projet.etudiants_groupes , projet.groupes, projet.inscriptions TO raphaelmalka;
+
+/* GRANT SUR LES INSERT */
+GRANT INSERT ON TABLE projet.etudiants_groupes TO raphaelmalka;
+
+/* GRANT SUR LES UPDATE */
+GRANT UPDATE ON TABLE projet.groupes TO raphaelmalka;
+
+/* GRANT SUR LES DELETE */
+GRANT DELETE ON TABLE projet.etudiants_groupes TO raphaelmalka;
